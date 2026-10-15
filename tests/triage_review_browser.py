@@ -69,6 +69,104 @@ try:
         }''',adopted))
         page.reload();page.wait_for_function('storageReady')
         check('Corrected adopted decision survives reload',page.evaluate('id=>S.triage.decisions[id].personal_note',adopted)=='Sichtbare Korrektur nach Fehler')
+        # Hold a real IndexedDB transaction open while another view requests a save.
+        def prepare_delayed_write():
+            page.evaluate('''async()=>{
+                closeSettings();S=defaultState();
+                S.documents.first={id:'first',title:'Erste Karte',category:'article'};
+                S.documents.second={id:'second',title:'Zweite Karte',category:'article'};
+                reconcileTriage(S);await saveState();renderAll();setView('triage');await _dbWriteQueue;
+                window.raceTransaction=db.transaction.bind(db);
+                window.racePending=false;window.raceOutcome=null;window.holdNextWrite=true;
+                db.transaction=function(...args){
+                    var tx=raceTransaction(...args);
+                    if(args[1]==='readwrite' && holdNextWrite){
+                        holdNextWrite=false;
+                        var objectStore=tx.objectStore.bind(tx);
+                        tx.objectStore=function(name){
+                            var store=objectStore(name),put=store.put.bind(store);
+                            store.put=function(...values){
+                                var request=put(...values);
+                                request.addEventListener('success',function(){
+                                    racePending=true;
+                                    function keepAlive(){
+                                        if(raceOutcome==='abort'){tx.abort();return;}
+                                        if(raceOutcome==='commit')return;
+                                        store.get(DB_KEY).onsuccess=keepAlive;
+                                    }
+                                    keepAlive();
+                                });
+                                return request;
+                            };
+                            return store;
+                        };
+                    }
+                    return tx;
+                };
+            }''')
+            return page.evaluate('S.triage.current')
+
+        card=prepare_delayed_write()
+        page.get_by_role('button',name='Speichern & nächste Karte',exact=True).click()
+        page.wait_for_function('racePending')
+        page.locator('[data-view=calendar]').click()
+        check('Tentative decision stays outside shared state during concurrent view save',
+              page.evaluate('id=>!S.triage.decisions[id] && S.triage.current===id',card))
+        page.evaluate('raceOutcome="abort"')
+        page.wait_for_function('!triageBusy')
+        page.evaluate('async()=>{await _dbWriteQueue.catch(()=>{});db.transaction=raceTransaction;}')
+        check('Aborted decision cannot leak through queued view save',page.evaluate('''async id=>{
+            var stored=await idbGetState();
+            return !S.triage.decisions[id] && !stored.triage.decisions[id] && stored.triage.current===id && !stored.triage.active;
+        }''',card))
+        page.reload();page.wait_for_function('storageReady')
+        check('Failed decision remains absent after reload',page.evaluate('id=>!S.triage.decisions[id] && S.triage.current===id',card))
+
+        card=prepare_delayed_write()
+        page.get_by_role('button',name='Speichern & nächste Karte',exact=True).click()
+        page.wait_for_function('racePending')
+        page.locator('[data-view=calendar]').click()
+        page.evaluate('raceOutcome="commit"')
+        page.wait_for_function('!triageBusy')
+        page.evaluate('async()=>{await _dbWriteQueue;db.transaction=raceTransaction;}')
+        check('Successful decision survives queued view save with selected view',page.evaluate('''async id=>{
+            var stored=await idbGetState();
+            return !!stored.triage.decisions[id] && stored.triage.current!==id && !stored.triage.active && currentView==='calendar';
+        }''',card))
+        page.reload();page.wait_for_function('storageReady')
+        check('Successful concurrent decision and view survive reload',page.evaluate('id=>!!S.triage.decisions[id] && currentView==="calendar"',card))
+
+        card=prepare_delayed_write()
+        page.get_by_role('button',name='Später entscheiden',exact=True).click()
+        page.wait_for_function('racePending')
+        page.locator('[data-view=library]').click()
+        page.evaluate('raceOutcome="abort"')
+        page.wait_for_function('!triageBusy')
+        page.evaluate('async()=>{await _dbWriteQueue;db.transaction=raceTransaction;}')
+        check('Aborted navigation cannot leak through queued view save',page.evaluate('''async id=>{
+            var stored=await idbGetState();
+            return S.triage.current===id && stored.triage.current===id && stored.triage.queue[0]===id && stored.triage.trail.length===0;
+        }''',card))
+        # A Reader response arriving during the triage write must wait for its outcome.
+        for outcome in ['abort','commit']:
+            card=prepare_delayed_write()
+            page.get_by_role('button',name='Speichern & nächste Karte',exact=True).click()
+            page.wait_for_function('racePending')
+            page.evaluate('''()=>{
+                localStorage.setItem(TOKEN_KEY,'synthetic-test-token');
+                window.originalFetchTracked=fetchTrackedDocuments;
+                fetchTrackedDocuments=async()=>[{id:'incoming',title:'Während des Schreibens geladen',category:'article',last_opened_at:'2020-01-01T00:00:00.000Z'}];
+                window.concurrentSync=syncReadwise();
+            }''')
+            check('Reader response waits for pending triage write ('+outcome+')',
+                  page.evaluate('isSyncing && !S.documents.incoming'))
+            page.evaluate('outcome=>{raceOutcome=outcome;}',outcome)
+            page.evaluate('async()=>{await concurrentSync;await _dbWriteQueue;db.transaction=raceTransaction;fetchTrackedDocuments=originalFetchTracked;localStorage.removeItem(TOKEN_KEY);}')
+            check('Reader observations and triage outcome both survive ('+outcome+')',page.evaluate('''async x=>{
+                var stored=await idbGetState();
+                return !!stored.documents.incoming && Object.values(stored.triage.observations).some(o=>o.reader_id==='incoming') && !!stored.triage.decisions[x.card]===(x.outcome==='commit');
+            }''',dict(card=card,outcome=outcome)))
+
         # Large library: keyboard events must not serialize one full snapshot per character.
         page.evaluate('''async()=>{
             closeSettings();S=defaultState();

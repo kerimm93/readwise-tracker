@@ -6,8 +6,8 @@ Browserprofil und temporärem lokalem HTTP-Server. Kein persönlicher Token verw
 ## Ergebnis
 
 `python3 tests/triage_browser.py`: **52 Prüfungen erfolgreich**.
-`python3 tests/triage_review_browser.py`: **11 weitere Prüfungen erfolgreich**.
-Insgesamt **63 erfolgreiche Prüfungen**, keine fehlgeschlagenen Prüfungen und
+`python3 tests/triage_review_browser.py`: **21 weitere Prüfungen erfolgreich**.
+Insgesamt **73 erfolgreiche Prüfungen**, keine fehlgeschlagenen Prüfungen und
 keine unbehandelten JavaScript-Ausnahmen. Die Testdatei enthält die
 einzelnen Assertions und gibt jede erfolgreich geprüfte Bedingung aus.
 
@@ -47,6 +47,16 @@ nach der Pause wird genau ein Snapshot mit dem letzten Stand geschrieben.
 Explizites Speichern, Navigation, Seiten-Lifecycle und Import erzeugen keine
 nachträglichen doppelten oder veralteten Timer-Schreibvorgänge. Timer werden für
 diese Tests kontrolliert über die Playwright-Browseruhr ausgeführt.
+
+Weitere Parallelitätsprüfungen halten eine echte IndexedDB-Schreibtransaktion
+kontrolliert offen, wechseln währenddessen die Ansicht und lassen die Transaktion
+erfolgreich abschließen oder abbrechen. Abgebrochene Entscheidungen und Navigation
+bleiben auch nach nachfolgender Speicherung und Reload aus dem persistenten State
+entfernt. Erfolgreiche Entscheidungen und die zuletzt gewählte Ansicht bleiben erhalten.
+Simulierte Reader-Antworten während des Schreibens warten auf dessen Ausgang;
+nachgeladene Beobachtungen bleiben sowohl nach Abbruch als auch nach Erfolg erhalten.
+Der neue Regressionstest scheiterte zunächst am bisherigen Code und besteht nach
+der Umstellung auf isolierte Kandidaten-States und verzögerte parallele Saves.
 
 ## Grenzen
 

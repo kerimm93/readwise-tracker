@@ -27,7 +27,9 @@ Eingaben werden im Formular sofort übernommen und nach 300 ms Tipp-Pause als En
 lokal gespeichert. Der Status zeigt ausstehende oder fehlgeschlagene Schreibvorgänge.
 Kartenwechsel und explizites Speichern schließen die neuesten Eingaben ein; beim
 Verlassen der Seite wird ein ausstehender Entwurf zur Speicherung angestoßen. **Speichern & nächste Karte**
-übernimmt die Entscheidung erst nach abgeschlossener Speichertransaktion.
+übernimmt die Entscheidung erst nach abgeschlossener Speichertransaktion. Noch
+nicht bestätigte Entscheidungen und Navigationsänderungen bleiben in einem getrennten
+Kandidaten-State; parallele Speichervorgänge warten dessen Ergebnis ab.
 **Später entscheiden** verschiebt eine offene Karte ans Ende; **Zurück** und
 **Letzte Entscheidung bearbeiten** erlauben Korrekturen. Neue Beobachtungen zu
 einem Dokument zeigen dessen frühere Entscheidung zum bewussten Übernehmen.

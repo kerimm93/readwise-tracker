@@ -438,6 +438,7 @@ function idbGetState() {
 }
 
 var _dbWriteQueue = Promise.resolve();
+var triageWriteBarrier=null;
 function persistState(state) {
   var snapshot=JSON.parse(JSON.stringify(state));
   var operation=_dbWriteQueue.catch(function(){}).then(function(){
@@ -455,6 +456,8 @@ function persistState(state) {
 }
 // Explicit saves include the latest in-memory draft and replace its pending timer.
 function saveState() {
+  // Snapshot only after a pending triage candidate has committed or been rejected.
+  if (triageWriteBarrier) return triageWriteBarrier.then(saveState);
   clearTimeout(triageDraftTimer);
   triageDraftTimer=null;
   var status=triageDraftStatus,write=triageDraftWrite;
@@ -870,6 +873,7 @@ async function loadOlderHistory() {
       var cat=cats[i];
       var cursor=S.historyCursors[cat]||'';
       var data=await fetchOneHistoryPage(token,cat,cursor);
+      if (triageWriteBarrier) await triageWriteBarrier;
       loadedCount += mergeFetchedDocuments(data.results||[],new Date().toISOString());
       S.historyPages[cat]=Number(S.historyPages[cat]||0)+1;
       S.historyCursors[cat]=data.nextPageCursor||'';
@@ -909,6 +913,7 @@ async function syncReadwise() {
     var firstSync=!S.firstTrackedAt;
     var since=firstSync ? initialWindowSince() : incrementalSince();
     var raw=await fetchTrackedDocuments(token,since);
+    if (triageWriteBarrier) await triageWriteBarrier;
     var docs=raw.map(normalizeDoc);
     var syncAt=new Date().toISOString();
     if (firstSync) {
@@ -1197,13 +1202,34 @@ function triageAdopt() {
   renderTriage();
   scheduleTriageDraftSave();
 }
-async function saveTriageDecision() {
-  if(triageBusy || importBusy || !storageReady || !S.triage.current) return;
+async function commitTriageUpdate(update,errorMessage) {
   triageBusy=true;
   document.getElementById('triagePanel').inert=true;
-  var before=JSON.parse(JSON.stringify(S.triage)), t=S.triage,id=t.current;
+  clearTimeout(triageDraftTimer);
+  triageDraftTimer=null;
+  var release;
+  triageWriteBarrier=new Promise(function(resolve){ release=resolve; });
   try {
-    var f=JSON.parse(JSON.stringify(triageDraft(id))); validateTriageFields(f);
+    // Shared state stays committed while the isolated candidate is being written.
+    var candidate=JSON.parse(JSON.stringify(S));
+    update(candidate.triage);
+    await persistState(candidate);
+    // View tabs remain usable; their deferred saves retain the latest selection.
+    candidate.triage.active=S.triage.active;
+    S.triage=candidate.triage;
+    renderTriage();
+  } catch(e) { toast(errorMessage+e.message); }
+  finally {
+    triageBusy=false;
+    document.getElementById('triagePanel').inert=false;
+    triageWriteBarrier=null;
+    release();
+  }
+}
+async function saveTriageDecision() {
+  if(triageBusy || importBusy || !storageReady || !S.triage.current) return;
+  await commitTriageUpdate(function(t){
+    var id=t.current,f=JSON.parse(JSON.stringify(triageDraft(id))); validateTriageFields(f);
     var old=t.decisions[id],now=new Date().toISOString();
     if (!old || triageContent(old)!==triageContent(f)) {
       var revision=old?old.revision+1:1;
@@ -1213,16 +1239,12 @@ async function saveTriageDecision() {
     }
     delete t.drafts[id]; t.last_decision=id; t.trail.push(id);
     t.current=t.queue.find(function(k){return k!==id && triageVisible(k) && !own(t.decisions,k);}) || null;
-    await saveState(); renderTriage();
-  } catch(e) { S.triage=before; toast('Entscheidung nicht gespeichert: '+e.message); }
-  finally {triageBusy=false; document.getElementById('triagePanel').inert=false;}
+  },'Entscheidung nicht gespeichert: ');
 }
 async function triageNavigate(action) {
   if(triageBusy || importBusy || !storageReady) return;
-  triageBusy=true;
-  document.getElementById('triagePanel').inert=true;
-  var before=JSON.parse(JSON.stringify(S.triage)),t=S.triage,id=t.current,next=null;
-  try {
+  await commitTriageUpdate(function(t){
+    var id=t.current,next=null;
     if(action==='back') next=t.trail.pop() || id;
     else if(action==='last') next=t.last_decision || id;
     else {
@@ -1234,9 +1256,7 @@ async function triageNavigate(action) {
     }
     if(action!=='back' && id && id!==next) t.trail.push(id);
     t.current=next;
-    await saveState(); renderTriage();
-  }catch(e){S.triage=before;toast('Navigation nicht gespeichert: '+e.message);}
-  finally{triageBusy=false; document.getElementById('triagePanel').inert=false;}
+  },'Navigation nicht gespeichert: ');
 }
 
 document.addEventListener('visibilitychange',function(){ if (document.visibilityState==='hidden') flushTriageDraft(); });

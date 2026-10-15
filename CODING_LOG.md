@@ -33,3 +33,16 @@ nur tatsächlich ausgeführte Arbeit; es ersetzt keinen verifizierten Notion-Ein
   Backup-Import kann nicht durch einen alten Entwurfstimer überschrieben werden.
 - 11 gezielte Browserregressionen mit Schreibfehlern und 1.000 Dokumenten ergänzt;
   die 52 bestehenden Prüfungen erneut erfolgreich ausgeführt (insgesamt 63).
+
+## PR-Review · konkurrierende Speichervorgänge
+
+- Den gemeldeten Wettlauf durch einen neuen Browsertest gegen den bisherigen Code
+  reproduziert: während einer offenen Entscheidungstransaktion wechselte die Ansicht.
+- Entscheidungs- und Navigationsänderungen werden jetzt auf einem getrennten
+  Kandidaten-State vorbereitet und erst nach erfolgreichem Commit übernommen.
+  Andere Saves erstellen ihren Snapshot erst nach Abschluss dieses Vorgangs.
+- Währenddessen eintreffende Sync-/History-Antworten warten mit der State-Integration.
+  Die zuletzt gewählte Ansicht bleibt erhalten; ein Rollback des gemeinsamen States
+  ist für fehlgeschlagene Entscheidungen und Navigation nicht mehr erforderlich.
+- Zehn zusätzliche Prüfungen für Abbruch/Erfolg, parallelen Ansichtswechsel, Reload,
+  Navigation und Reader-Antworten erfolgreich; mit den bestehenden Tests insgesamt 73.
