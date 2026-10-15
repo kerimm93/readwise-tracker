@@ -23,7 +23,10 @@ Reader synchronisieren oder ein bestehendes JSON-Backup importieren. Die Ansicht
 Routen, Notiz und Reader-Aktionsabsicht sind unabhängig. Ruhen lassen und Verwerfen
 schließen alle anderen Routen aus. Keine Auswahl löst Reader-Schreibaktionen aus.
 
-Eingaben werden als Entwurf lokal gespeichert. **Speichern & nächste Karte**
+Eingaben werden im Formular sofort übernommen und nach 300 ms Tipp-Pause als Entwurf
+lokal gespeichert. Der Status zeigt ausstehende oder fehlgeschlagene Schreibvorgänge.
+Kartenwechsel und explizites Speichern schließen die neuesten Eingaben ein; beim
+Verlassen der Seite wird ein ausstehender Entwurf zur Speicherung angestoßen. **Speichern & nächste Karte**
 übernimmt die Entscheidung erst nach abgeschlossener Speichertransaktion.
 **Später entscheiden** verschiebt eine offene Karte ans Ende; **Zurück** und
 **Letzte Entscheidung bearbeiten** erlauben Korrekturen. Neue Beobachtungen zu
@@ -62,6 +65,7 @@ Benötigt Python 3, Python-Paket `playwright` und Chromium unter `/usr/bin/chrom
 
 ```sh
 python3 tests/triage_browser.py
+python3 tests/triage_review_browser.py
 ```
 
 Die Tests starten einen eigenen temporären HTTP-Server und verwenden ein isoliertes

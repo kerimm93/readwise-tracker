@@ -21,3 +21,15 @@ nur tatsächlich ausgeführte Arbeit; es ersetzt keinen verifizierten Notion-Ein
   simulierten Reader-Abrufen und gezielt abgebrochenen Schreibtransaktionen erstellt.
 - Beim Test gefundenen Fehler in der Backfill-Kennzeichnung bei vorhandenen
   Beobachtungen ohne Datum korrigiert. Alle abschließenden Tests: siehe Testbericht.
+
+## PR-Review-Korrekturen
+
+- Übernommene frühere Entscheidungen werden vor dem Speicherzugriff im Formular
+  angezeigt. Bei Schreibfehlern bleiben sichtbare Felder und In-Memory-Entwurf gleich;
+  der Speicherstatus meldet den Fehler. Nachfolgende Korrekturen werden korrekt gespeichert.
+- Entwurfsspeicherung um 300 ms verzögert und zusammengefasst, sodass Tastatureingaben
+  keine Vollstate-Serialisierung pro Zeichen mehr auslösen. Explizite Saves bündeln
+  den ausstehenden Entwurf; Pagehide/Visibilitychange stoßen dessen Speicherung an.
+  Backup-Import kann nicht durch einen alten Entwurfstimer überschrieben werden.
+- 11 gezielte Browserregressionen mit Schreibfehlern und 1.000 Dokumenten ergänzt;
+  die 52 bestehenden Prüfungen erneut erfolgreich ausgeführt (insgesamt 63).

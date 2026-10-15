@@ -5,8 +5,10 @@ Browserprofil und temporärem lokalem HTTP-Server. Kein persönlicher Token verw
 
 ## Ergebnis
 
-`python3 tests/triage_browser.py`: **52 Prüfungen erfolgreich**, keine fehlgeschlagenen
-Prüfungen und keine unbehandelten JavaScript-Ausnahmen. Die Testdatei enthält die
+`python3 tests/triage_browser.py`: **52 Prüfungen erfolgreich**.
+`python3 tests/triage_review_browser.py`: **11 weitere Prüfungen erfolgreich**.
+Insgesamt **63 erfolgreiche Prüfungen**, keine fehlgeschlagenen Prüfungen und
+keine unbehandelten JavaScript-Ausnahmen. Die Testdatei enthält die
 einzelnen Assertions und gibt jede erfolgreich geprüfte Bedingung aus.
 
 Geprüft wurden:
@@ -36,6 +38,15 @@ Geprüft wurden:
 
 Zusätzlich: JavaScript-Syntax mit `node --check`, `git diff --check` und mobile
 Darstellung bei 390 px Breite geprüft. Kein horizontaler Seitenüberlauf.
+
+Zusätzliche Review-Regressionen prüfen eine fehlgeschlagene Übernahme früherer
+Entscheidungen mit sichtbaren Werten und Fehlermeldung sowie anschließende Korrektur,
+Commit und Reload. Echte Tastatureingaben mit 1.000 synthetischen Dokumenten (rund
+2 MB Beschreibungstext) erzeugen während des Tippens keine Vollstate-Snapshots;
+nach der Pause wird genau ein Snapshot mit dem letzten Stand geschrieben.
+Explizites Speichern, Navigation, Seiten-Lifecycle und Import erzeugen keine
+nachträglichen doppelten oder veralteten Timer-Schreibvorgänge. Timer werden für
+diese Tests kontrolliert über die Playwright-Browseruhr ausgeführt.
 
 ## Grenzen
 
