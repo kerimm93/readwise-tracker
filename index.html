@@ -133,6 +133,15 @@
       .stat { padding:10px; }
       .stat .value { font-size:23px; }
     }
+    .triage-body { padding:16px; max-width:800px; margin:auto; }
+    .triage-body h3 { font-family:var(--serif); font-size:25px; margin:12px 0; }
+    .triage-routes { display:grid; gap:8px; border:1px solid var(--rule); border-radius:9px; padding:12px; }
+    .triage-routes label { display:flex; align-items:center; gap:8px; min-height:36px; }
+    .triage-routes input { width:20px; height:20px; flex-shrink:0; }
+    .triage-body textarea,.triage-body select { width:100%; padding:10px; color:var(--ink); background:var(--surface); border:1px solid var(--rule-strong); border-radius:8px; }
+    .triage-summary,.triage-note { white-space:pre-wrap; overflow-wrap:anywhere; }
+    .triage-nav { margin-top:20px; border-top:1px solid var(--rule); padding-top:12px; }
+    .triage-body a { color:var(--accent); }
   </style>
 </head>
 <body>
@@ -159,6 +168,7 @@
     <div class="tabs">
       <button class="tab active" data-view="calendar" onclick="setView('calendar')">Kalender</button>
       <button class="tab" data-view="timeline" onclick="setView('timeline')">Timeline</button>
+      <button class="tab" data-view="triage" onclick="setView('triage')">Triage</button>
       <button class="tab" data-view="library" onclick="setView('library')">Bibliothek</button>
     </div>
     <div class="history-loader" id="historyLoader"></div>
@@ -202,6 +212,7 @@
       <div class="library" id="library"></div>
     </div>
   </section>
+  <section id="triageView" class="hidden"><div class="panel" id="triagePanel"></div></section>
 </div>
 
 <div class="modal-backdrop" id="settingsBackdrop" onclick="backdropClose(event)">
@@ -265,6 +276,7 @@ var selectedDate = localISODate(new Date());
 var currentMonth = selectedDate.slice(0,7);
 var isSyncing = false;
 var pendingImport = null;
+var importBusy = false;
 
 var CATEGORY_LABELS = {
   all:'Alles', epub:'Bücher', article:'Artikel', pdf:'PDF', email:'E-Mail', rss:'RSS', tweet:'Tweets', video:'Video', podcast:'Podcast'
@@ -272,19 +284,90 @@ var CATEGORY_LABELS = {
 
 function defaultState() {
   return {
-    version:2, documents:{}, events:[], lastSyncAt:'', firstTrackedAt:'', baselineImported:false,
+    version:3, triage:emptyTriage(), documents:{}, events:[], lastSyncAt:'', firstTrackedAt:'', baselineImported:false,
     recentWindowStartedAt:'', historyCursors:{}, historyDone:{}, historyPages:{}
   };
 }
 
-function ensureStateDefaults() {
-  if (!S.documents) S.documents={};
-  if (!S.events) S.events=[];
-  if (!S.historyCursors) S.historyCursors={};
-  if (!S.historyDone) S.historyDone={};
-  if (!S.historyPages) S.historyPages={};
-  if (!S.recentWindowStartedAt) S.recentWindowStartedAt='';
-  S.version=2;
+// Phase 1: local observations and decisions only; no external write path.
+var TRIAGE_ROUTES = { soon:'Bald weiterlesen', later:'Später weiterlesen', reread:'Erneut lesen', deepen:'Vertieft verarbeiten', park:'Vorerst ruhen lassen', discard:'Verwerfen' };
+function emptyTriage() {
+  return { observations:{}, decisions:{}, queue:[], current:null, trail:[], last_decision:null, drafts:{}, active:false };
+}
+function own(obj,key) { return Object.prototype.hasOwnProperty.call(obj,key); }
+function validIso(value) { return typeof value==='string' && /^\d{4}-\d\d-\d\dT/.test(value) && isFinite(Date.parse(value)); }
+function triageSort(a,b) {
+  var at=a.observed_event_at || '', bt=b.observed_event_at || '';
+  return (bt && at ? Date.parse(bt)-Date.parse(at) : (bt?1:at?-1:0)) || a.reader_id.localeCompare(b.reader_id,'en') || a.observation_id.localeCompare(b.observation_id,'en');
+}
+function reconcileTriage(state) {
+  var t=state.triage, candidates={};
+  function add(readerId,kind,time,ref,progress,opened) {
+    readerId=String(readerId);
+    if (!own(state.documents,readerId)) return;
+    var identity=kind==='progress_change' ? ['progress',readerId,ref] : ['document',readerId,time||'unopened'];
+    var id='obs:'+JSON.stringify(identity);
+    if (own(candidates,id)) return;
+    candidates[id]={observation_id:id,reader_id:readerId,observed_event_at:validIso(time)?time:null,kind:kind,
+      sort_key:[validIso(time)?time:null,readerId,id],
+      source_snapshot_id:ref,captured_at:new Date().toISOString(),reading_progress:Number(progress||0),last_opened_at:validIso(opened)?opened:null,
+      review_visibility:'normal'};
+  }
+  state.events.forEach(function(e){
+    if (!e || !e.id || !own(state.documents,String(e.docId))) return;
+    if (e.type==='progress') add(e.docId,'progress_change',e.observedAt,'event:'+e.id,e.progressAfter,null);
+    else if (e.type==='opened' || e.type==='reader_opened') add(e.docId,'opening',e.observedAt,'event:'+e.id,e.progressAfter,e.observedAt);
+  });
+  Object.values(state.documents).forEach(function(d){
+    add(d.id,d.last_opened_at?'opening':'other',d.last_opened_at,'document:'+d.id+':'+(d.last_opened_at||'unopened'),d.reading_progress,d.last_opened_at);
+  });
+  var old=Object.values(t.observations).filter(function(o){return o.observed_event_at;}).sort(triageSort), boundary=old.length?old[old.length-1]:null;
+  var fresh=Object.values(candidates).filter(function(o){ return !own(t.observations,o.observation_id); }).sort(triageSort);
+  fresh.forEach(function(o){
+    if (boundary && o.observed_event_at && boundary.observed_event_at && Date.parse(o.observed_event_at)<Date.parse(boundary.observed_event_at)) o.review_visibility='backfilled';
+    t.observations[o.observation_id]=o;
+  });
+  // Existing queue order and selected card stay fixed; newly discovered cards append deterministically.
+  fresh.forEach(function(o){ t.queue.push(o.observation_id); });
+  if (!t.current) t.current=t.queue.find(function(id){return !own(t.decisions,id);}) || null;
+}
+function validateTriage(t,documents) {
+  function fail() { throw new Error('Triage-Daten sind ungültig oder unvollständig.'); }
+  function record(v) { return v && typeof v==='object' && !Array.isArray(v); }
+  if (!record(t) || !record(t.observations) || !record(t.decisions) || !record(t.drafts) || !Array.isArray(t.queue) || !Array.isArray(t.trail) || typeof t.active!=='boolean') fail();
+  Object.entries(t.observations).forEach(function(pair){
+    var id=pair[0],o=pair[1];
+    if (!record(o) || o.observation_id!==id || typeof o.reader_id!=='string' || !own(documents,o.reader_id) || !['opening','progress_change','other','manual_review'].includes(o.kind) || (o.observed_event_at!==null && !validIso(o.observed_event_at)) || !validIso(o.captured_at) || typeof o.source_snapshot_id!=='string' || !['normal','backfilled','duplicate_suppressed'].includes(o.review_visibility)) fail();
+  });
+  if (new Set(t.queue).size!==t.queue.length || t.queue.length!==Object.keys(t.observations).length || t.queue.some(function(id){return !own(t.observations,id);})) fail();
+  if ((t.current!==null && !own(t.observations,t.current)) || (t.last_decision!==null && !own(t.decisions,t.last_decision)) || t.trail.some(function(id){return !own(t.observations,id);})) fail();
+  var ids=new Set();
+  Object.entries(t.decisions).forEach(function(pair){
+    var id=pair[0],d=pair[1];
+    if (!record(d) || !own(t.observations,id) || d.observation_id!==id || d.reader_id!==t.observations[id].reader_id || typeof d.decision_id!=='string' || !d.decision_id || ids.has(d.decision_id) || !Number.isInteger(d.revision) || d.revision<1 || !validIso(d.reviewed_at) || !validIso(d.updated_at) || !Array.isArray(d.revisions) || d.revisions.length!==d.revision) fail();
+    ids.add(d.decision_id); validateTriageFields(d);
+    d.revisions.forEach(function(r,i){if (!record(r) || r.revision!==i+1 || !validIso(r.updated_at)) fail(); validateTriageFields(r);});
+    var last=d.revisions[d.revisions.length-1];
+    if (triageContent(last)!==triageContent(d) || last.updated_at!==d.updated_at) fail();
+  });
+  Object.entries(t.drafts).forEach(function(pair){if (!own(t.observations,pair[0])) fail(); validateTriageFields(pair[1]);});
+}
+function validateTriageFields(d) {
+  if (!d || !(d.interest_rating===null || (Number.isInteger(d.interest_rating) && d.interest_rating>=0 && d.interest_rating<=5)) || !Array.isArray(d.routes) || d.routes.some(function(r){return !own(TRIAGE_ROUTES,r);}) || new Set(d.routes).size!==d.routes.length || ((d.routes.includes('park') || d.routes.includes('discard')) && d.routes.length!==1) || typeof d.personal_note!=='string' || !['none','archive','later'].includes(d.reader_action)) throw new Error('Ungültige Triage-Bewertung oder widersprüchliche Routen.');
+}
+function triageContent(d) {
+  return JSON.stringify([d.interest_rating,d.routes.slice().sort(),d.personal_note,d.reader_action]);
+}
+function migrateState(candidate) {
+  validateImportedState(candidate);
+  if (candidate.version!=null && (!Number.isInteger(candidate.version) || candidate.version>3 || candidate.version<1)) throw new Error('Nicht unterstützte State-Version.');
+  var next=Object.assign(defaultState(),JSON.parse(JSON.stringify(candidate)));
+  if (candidate.version===3 && !own(candidate,'triage')) throw new Error('Triage-State fehlt.');
+  if (own(candidate,'triage')) validateTriage(next.triage,next.documents);
+  else next.triage=emptyTriage();
+  next.version=3;
+  reconcileTriage(next);
+  return next;
 }
 
 function localISODate(d) {
@@ -355,28 +438,47 @@ function idbGetState() {
 }
 
 var _dbWriteQueue = Promise.resolve();
-function saveState() {
-  _dbWriteQueue = _dbWriteQueue.then(function(){
+function persistState(state) {
+  var snapshot=JSON.parse(JSON.stringify(state));
+  var operation=_dbWriteQueue.catch(function(){}).then(function(){
     return new Promise(function(resolve,reject){
+      if (!db) { reject(new Error('Lokaler Speicher nicht verfügbar.')); return; }
       var tx=db.transaction(DB_STORE,'readwrite');
-      var req=tx.objectStore(DB_STORE).put(S,DB_KEY);
-      req.onsuccess=function(){ resolve(); };
-      req.onerror=function(e){ reject(e.target.error); };
+      tx.oncomplete=function(){ resolve(); };
+      tx.onabort=function(){ reject(tx.error || new Error('Speichertransaktion abgebrochen.')); };
+      tx.onerror=function(){ reject(tx.error || new Error('Speicherfehler.')); };
+      tx.objectStore(DB_STORE).put(snapshot,DB_KEY);
     });
   });
-  return _dbWriteQueue;
+  _dbWriteQueue=operation;
+  return operation;
 }
+// Explicit saves include the latest in-memory draft and replace its pending timer.
+function saveState() {
+  clearTimeout(triageDraftTimer);
+  triageDraftTimer=null;
+  var status=triageDraftStatus,write=triageDraftWrite;
+  return persistState(S).then(function(){
+    if (status && status.isConnected && write===triageDraftWrite) status.textContent='Entwurf lokal gespeichert';
+  }).catch(function(error){
+    if (status && status.isConnected && write===triageDraftWrite) status.textContent='Speichern fehlgeschlagen. Bitte erneut speichern.';
+    throw error;
+  });
+}
+var storageReady=false;
 
 async function init() {
   applyTheme(localStorage.getItem(THEME_KEY) || 'light');
   try {
     await openDb();
     var loaded = await idbGetState();
-    if (loaded) S = Object.assign(defaultState(), loaded);
-    ensureStateDefaults();
+    S=migrateState(loaded || defaultState());
+    await saveState();
+    storageReady=true;
+    if (S.triage.active) currentView='triage';
   } catch(e) {
     console.error('[Reader Log] IndexedDB init failed', e);
-    toast('Lokaler Speicher konnte nicht geöffnet werden.');
+    toast('Lokaler State konnte nicht geladen werden. Gespeicherte Daten bleiben unverändert.');
   }
   renderAll();
   if (!localStorage.getItem(TOKEN_KEY)) openSettings();
@@ -390,6 +492,7 @@ function renderAll() {
   renderCalendar();
   renderTimeline();
   renderLibrary();
+  renderTriage();
   updateViewVisibility();
 }
 
@@ -399,6 +502,7 @@ function renderStatus() {
   var html = '';
   html += '<span class="pill '+(token?'ok':'warn')+'">'+(token?'Readwise verbunden':'Token fehlt')+'</span>';
   html += '<span class="pill info">'+docs.length+' lokal geladene Dokumente</span>';
+  if (!storageReady) html += '<span class="pill warn" role="alert">Lokaler State nicht bereit. Gespeicherte Daten bleiben erhalten; bitte neu laden oder ein gültiges Backup importieren.</span>';
   if (S.lastSyncAt) html += '<span class="pill">Letzter Sync: '+esc(fmtDateTime(S.lastSyncAt))+'</span>';
   if (S.firstTrackedAt) html += '<span class="pill">Tracking seit '+esc(fmtDate(localDateFromIso(S.firstTrackedAt)))+'</span>';
   if (S.recentWindowStartedAt) html += '<span class="pill">Erstimport: letzte '+INITIAL_WINDOW_DAYS+' Tage</span>';
@@ -454,11 +558,15 @@ function renderHistoryLoader() {
 
 function setView(v) {
   currentView=v;
+  S.triage.active=v==='triage';
+  if (storageReady && !importBusy) saveState().catch(function(){toast('Ansicht konnte nicht gespeichert werden.');});
   updateViewVisibility();
 }
 
 function updateViewVisibility() {
-  ['calendar','timeline','library'].forEach(function(v){
+  document.querySelector('.stats').classList.toggle('hidden',currentView==='triage');
+  document.getElementById('historyLoader').classList.toggle('hidden',currentView==='triage');
+  ['calendar','timeline','library','triage'].forEach(function(v){
     document.getElementById(v+'View').classList.toggle('hidden', currentView!==v);
     var b=document.querySelector('.tab[data-view="'+v+'"]');
     if (b) b.classList.toggle('active', currentView===v);
@@ -589,7 +697,7 @@ function normalizeDoc(d) {
     word_count:Number(d.word_count||0), reading_progress:Number(d.reading_progress||0),
     first_opened_at:d.first_opened_at||null, last_opened_at:d.last_opened_at||null,
     updated_at:d.updated_at||null, saved_at:d.saved_at||null, image_url:d.image_url||null,
-    url:d.url||null, source_url:d.source_url||null
+    url:d.url||null, source_url:d.source_url||null, summary:typeof d.summary==='string'?d.summary:''
   };
 }
 
@@ -739,11 +847,13 @@ function mergeFetchedDocuments(rawDocs,observedAt) {
     next[d.id]=d;
   });
   S.documents=next;
+  reconcileTriage(S);
   return docs.length;
 }
 
 async function loadOlderHistory() {
-  if (isSyncing) return;
+  if (isSyncing || importBusy) return;
+  if (!storageReady) { toast('Lokaler Speicher nicht bereit. Bitte zuerst neu laden oder ein gültiges Backup importieren.'); return; }
   var token=localStorage.getItem(TOKEN_KEY);
   if (!token) { openSettings(); return; }
   var cats=historyCategoriesForCurrentFilter().filter(function(cat){ return !S.historyDone[cat]; });
@@ -788,7 +898,8 @@ function incrementalSince() {
 }
 
 async function syncReadwise() {
-  if (isSyncing) return;
+  if (isSyncing || importBusy) return;
+  if (!storageReady) { toast('Lokaler Speicher nicht bereit. Bitte zuerst neu laden oder ein gültiges Backup importieren.'); return; }
   var token=localStorage.getItem(TOKEN_KEY);
   if (!token) { openSettings(); return; }
   isSyncing=true;
@@ -811,6 +922,7 @@ async function syncReadwise() {
     docs.forEach(function(d){ next[d.id]=d; });
     S.documents=next;
     S.lastSyncAt=syncAt;
+    reconcileTriage(S);
     await saveState();
     renderAll();
     toast(firstSync ? ('Erstsync: '+docs.length+' Dokumente aus den letzten '+INITIAL_WINDOW_DAYS+' Tagen geladen.') : ('Readwise synchronisiert: '+docs.length+' Änderungen.'));
@@ -839,6 +951,7 @@ function saveSettings() {
 }
 
 function backupPayload() {
+  if (!storageReady) throw new Error('Lokaler State nicht geladen.');
   return {
     format:BACKUP_FORMAT,
     exportedAt:new Date().toISOString(),
@@ -875,6 +988,14 @@ function validateImportedState(candidate) {
   if (!candidate || typeof candidate!=='object') throw new Error('Kein gültiger App-State.');
   if (!candidate.documents || typeof candidate.documents!=='object' || Array.isArray(candidate.documents)) throw new Error('Dokumentstand fehlt oder ist ungültig.');
   if (!Array.isArray(candidate.events)) throw new Error('Fortschrittsereignisse fehlen oder sind ungültig.');
+  Object.entries(candidate.documents).forEach(function(pair){
+    var d=pair[1];
+    if (!d || typeof d!=='object' || Array.isArray(d) || d.id==null || String(d.id)!==pair[0]) throw new Error('Ungültiger Dokumentdatensatz.');
+  });
+  if (candidate.events.some(function(e){return !e || typeof e!=='object' || Array.isArray(e);})) throw new Error('Ungültiges Fortschrittsereignis.');
+  ['historyCursors','historyDone','historyPages'].forEach(function(key){
+    if (own(candidate,key) && (!candidate[key] || typeof candidate[key]!=='object' || Array.isArray(candidate[key]))) throw new Error('Ungültige Lazy-History-Metadaten.');
+  });
   return candidate;
 }
 
@@ -897,6 +1018,7 @@ function showImportPreview(fileName,state,theme,exportedAt) {
   var html='<strong>'+esc(fileName||'Backup')+'</strong><ul>';
   html+='<li>'+docs+' Dokumente</li>';
   html+='<li>'+events+' Fortschritts-/Aktivitätsereignisse</li>';
+  html+='<li>'+Object.keys(state.triage.observations).length+' Triage-Beobachtungen · '+Object.keys(state.triage.decisions).length+' Entscheidungen (einschließlich Revisionsverlauf und Navigation)</li>';
   html+='<li>'+historyPages+' ältere API-Seiten bereits nachgeladen</li>';
   html+='<li>Zeitraum: '+esc(importDateRange(state))+'</li>';
   if (exportedAt) html+='<li>Backup erstellt: '+esc(fmtDateTime(exportedAt))+'</li>';
@@ -927,7 +1049,7 @@ function handleBackupFile(event) {
       } else {
         throw new Error('Unbekanntes Backup-Format.');
       }
-      state=validateImportedState(state);
+      state=migrateState(state);
       pendingImport={state:state,theme:theme,fileName:file.name,exportedAt:exportedAt};
       showImportPreview(file.name,state,theme,exportedAt);
     } catch(e) {
@@ -945,16 +1067,26 @@ function importBackdropClose(e) {
 }
 
 function cancelImport() {
+  if (importBusy) return;
   pendingImport=null;
   document.getElementById('importBackdrop').classList.remove('open');
 }
 
 async function confirmImport() {
-  if (!pendingImport) return;
+  if (!pendingImport || importBusy) return;
+  if (isSyncing || triageBusy) { toast('Bitte den laufenden Speicher- oder Sync-Vorgang abwarten.'); return; }
+  flushTriageDraft();
+  importBusy=true;
   try {
-    S=JSON.parse(JSON.stringify(pendingImport.state));
-    ensureStateDefaults();
-    await saveState();
+    var imported=migrateState(pendingImport.state);
+    await persistState(imported);
+    clearTimeout(triageDraftTimer);
+    triageDraftTimer=null;
+    triageDraftStatus=null;
+    triageDraftWrite++;
+    S=imported;
+    storageReady=true;
+    currentView=S.triage.active?'triage':'calendar';
     if (pendingImport.theme==='light' || pendingImport.theme==='eink') applyTheme(pendingImport.theme);
     pendingImport=null;
     document.getElementById('importBackdrop').classList.remove('open');
@@ -964,7 +1096,7 @@ async function confirmImport() {
   } catch(e) {
     console.error('[Reader Log] Backup restore failed',e);
     toast('Import fehlgeschlagen: '+e.message);
-  }
+  } finally { importBusy=false; }
 }
 
 function applyTheme(t) {
@@ -983,6 +1115,132 @@ function toast(msg) {
   clearTimeout(_toastTimer);
   _toastTimer=setTimeout(function(){ el.classList.remove('show'); },3200);
 }
+
+var triageBusy=false;
+var triageDraftWrite=0;
+var triageDraftTimer=null;
+var triageDraftStatus=null;
+var TRIAGE_DRAFT_DELAY_MS=300;
+function scheduleTriageDraftSave() {
+  clearTimeout(triageDraftTimer);
+  triageDraftWrite++;
+  triageDraftStatus=document.getElementById('triageSaveStatus');
+  if (triageDraftStatus) triageDraftStatus.textContent='Entwurf wird gespeichert …';
+  // Do not serialize the full library until typing pauses.
+  triageDraftTimer=setTimeout(function(){ saveState().catch(function(){}); },TRIAGE_DRAFT_DELAY_MS);
+}
+function flushTriageDraft() {
+  if (triageDraftTimer!==null && storageReady && !importBusy) saveState().catch(function(){});
+}
+function triageFields() {
+  return {interest_rating:null,routes:[],personal_note:'',reader_action:'none'};
+}
+function triageDraft(id) {
+  var t=S.triage;
+  return t.drafts[id] || t.decisions[id] || triageFields();
+}
+function triageVisible(id) {
+  var o=S.triage.observations[id],d=S.documents[o.reader_id];
+  return currentCategory==='all' || d.category===currentCategory;
+}
+function berlinTime(iso) {
+  return validIso(iso) ? new Intl.DateTimeFormat('de-DE',{dateStyle:'medium',timeStyle:'short',timeZone:'Europe/Berlin'}).format(new Date(iso))+' (Berlin)' : 'Kein belegter Öffnungszeitpunkt';
+}
+function renderTriage() {
+  var t=S.triage, all=t.queue.filter(triageVisible), done=all.filter(function(id){return own(t.decisions,id);}).length;
+  var id=t.current, o=id && t.observations[id];
+  var html='<div class="panel-head"><div><h2>Triage</h2><div class="small muted">'+done+' bewertet · '+(all.length-done)+' offen · '+all.length+' Beobachtungen im Filter</div></div></div><div class="triage-body">';
+  html+='<p class="small muted">Quelle: Reader-Zustand / lokal rekonstruierte Beobachtung. Keine vollständige Liste vergangener Lesesitzungen. Entscheidungen und Reader-Aktionsabsichten bleiben lokal.</p>';
+  if (o && !triageVisible(id)) {
+    html+='<p>Die aktuelle Karte liegt außerhalb des gewählten Filters. Eingaben bleiben erhalten.</p><button class="btn" onclick="triageNavigate(\'filtered\')">Offene Karte im Filter</button>';
+  } else if (!o) {
+    html+='<p class="empty">'+(all.length?'Alle Karten in diesem Filter bewertet.':'Noch keine passenden Beobachtungen. Synchronisiere Reader oder lade ein Backup.')+'</p><button class="btn" onclick="triageNavigate(\'filtered\')">Offene Karten anzeigen</button>';
+  } else {
+    var d=S.documents[o.reader_id], f=triageDraft(id);
+    var previous=Object.values(t.decisions).filter(function(x){return x.reader_id===o.reader_id && x.observation_id!==id;}).sort(function(a,b){return b.updated_at.localeCompare(a.updated_at);})[0];
+    html+='<article><h3>'+esc(d.title||'(ohne Titel)')+'</h3><p>'+esc(d.author||'Autor unbekannt')+' · '+esc(categoryLabel(d.category))+' · <a target="_blank" rel="noopener noreferrer" href="https://read.readwise.io/read/'+encodeURIComponent(o.reader_id)+'">In Reader öffnen</a></p>';
+    html+='<p class="small">Letztes belegtes Öffnen: '+esc(berlinTime(o.last_opened_at || (o.kind==='opening'?o.observed_event_at:d.last_opened_at)))+'<br>Fortschritt aktuell (Snapshot): '+esc(fmtPct(d.reading_progress))+' · Reader-Location: '+esc(d.location||'unbekannt')+'</p>';
+    html+='<p class="small muted">'+esc(o.kind==='progress_change'?'Rekonstruierte Fortschrittsänderung · '+berlinTime(o.observed_event_at):'Reader-Beobachtung')+(o.review_visibility==='backfilled'?' · nachträglich entdeckt':'')+(t.decisions[id]?' · Gespeicherte Revision '+t.decisions[id].revision+(t.decisions[id].routes.length?'':' · Lokaler Entwurf ohne Route'):'')+'</p>';
+    html+='<p class="triage-summary">'+esc(d.summary||'Keine Zusammenfassung verfügbar')+'</p>';
+    if (previous) html+='<aside class="notice">Frühere Entscheidung zu diesem Dokument: '+(previous.interest_rating===null?'ohne Wertung':previous.interest_rating+'/5')+' · '+esc(previous.routes.map(function(r){return TRIAGE_ROUTES[r];}).join(', ')||'ohne Route')+'<p class="triage-note">'+esc(previous.personal_note)+'</p><button class="btn" onclick="triageAdopt()">Frühere Entscheidung bewusst übernehmen</button></aside>';
+    html+='<div class="field"><label for="triageInterest">Interesse (unabhängig von der Route)</label><select id="triageInterest" onchange="triageInput()"><option value="">Noch nicht bewertet</option>';
+    for(var i=0;i<=5;i++) html+='<option value="'+i+'"'+(f.interest_rating===i?' selected':'')+'>'+i+' / 5</option>';
+    html+='</select></div><fieldset class="triage-routes"><legend>Weiterverwendung (Mehrfachauswahl)</legend>';
+    Object.keys(TRIAGE_ROUTES).forEach(function(r){html+='<label><input type="checkbox" value="'+r+'"'+(f.routes.includes(r)?' checked':'')+' onchange="triageRoute(this)"> '+TRIAGE_ROUTES[r]+'</label>';});
+    html+='</fieldset><p class="small muted">Ruhen lassen und Verwerfen sind jeweils exklusiv. Verwerfen archiviert niemals automatisch.</p><div class="field"><label for="triageNote">Persönliche Notiz</label><textarea id="triageNote" rows="4" oninput="triageInput()">'+esc(f.personal_note)+'</textarea></div><div class="field"><label for="triageAction">Reader-Aktionsabsicht (nur lokal)</label><select id="triageAction" onchange="triageInput()">';
+    [['none','Keine'],['archive','Ins Archiv verschieben'],['later','In Later verschieben']].forEach(function(a){html+='<option value="'+a[0]+'"'+(f.reader_action===a[0]?' selected':'')+'>'+a[1]+'</option>';});
+    html+='</select></div><p id="triageSaveStatus" role="status">'+(own(t.drafts,id)?'Lokaler Entwurf':'')+'</p><div class="control-row"><button class="btn primary" onclick="saveTriageDecision()">Speichern & nächste Karte</button><button class="btn" onclick="triageNavigate(\'later\')">Später entscheiden</button></div></article>';
+  }
+  html+='<div class="control-row triage-nav"><button class="btn" onclick="triageNavigate(\'back\')"'+(!t.trail.length?' disabled':'')+'>Zurück</button><button class="btn" onclick="triageNavigate(\'last\')"'+(!t.last_decision?' disabled':'')+'>Letzte Entscheidung bearbeiten</button></div></div>';
+  document.getElementById('triagePanel').innerHTML=html;
+}
+function triageRoute(input) {
+  document.querySelectorAll('.triage-routes input').forEach(function(box){
+    if (box!==input && input.checked && (['park','discard'].includes(input.value) || ['park','discard'].includes(box.value))) box.checked=false;
+  });
+  triageInput();
+}
+function triageInput() {
+  if (triageBusy || importBusy || !storageReady || !S.triage.current) return;
+  var rating=document.getElementById('triageInterest').value;
+  S.triage.drafts[S.triage.current]={interest_rating:rating===''?null:Number(rating),routes:Array.from(document.querySelectorAll('.triage-routes input:checked')).map(function(e){return e.value;}),personal_note:document.getElementById('triageNote').value,reader_action:document.getElementById('triageAction').value};
+  scheduleTriageDraftSave();
+}
+function triageAdopt() {
+  if (triageBusy || importBusy || !storageReady) return;
+  var t=S.triage,id=t.current,o=t.observations[id];
+  var previous=Object.values(t.decisions).filter(function(d){return d.reader_id===o.reader_id && d.observation_id!==id;}).sort(function(a,b){return b.updated_at.localeCompare(a.updated_at);})[0];
+  if (!previous) return;
+  var f=triageFields(); Object.keys(f).forEach(function(k){ f[k]=JSON.parse(JSON.stringify(previous[k])); });
+  t.drafts[id]=f;
+  // Display adopted values before persistence, so a failed write cannot hide them.
+  renderTriage();
+  scheduleTriageDraftSave();
+}
+async function saveTriageDecision() {
+  if(triageBusy || importBusy || !storageReady || !S.triage.current) return;
+  triageBusy=true;
+  document.getElementById('triagePanel').inert=true;
+  var before=JSON.parse(JSON.stringify(S.triage)), t=S.triage,id=t.current;
+  try {
+    var f=JSON.parse(JSON.stringify(triageDraft(id))); validateTriageFields(f);
+    var old=t.decisions[id],now=new Date().toISOString();
+    if (!old || triageContent(old)!==triageContent(f)) {
+      var revision=old?old.revision+1:1;
+      var history=old?old.revisions.slice():[];
+      history.push(Object.assign({revision:revision,updated_at:now},f));
+      t.decisions[id]=Object.assign({decision_id:old?old.decision_id:crypto.randomUUID(),observation_id:id,reader_id:t.observations[id].reader_id,revision:revision,reviewed_at:old?old.reviewed_at:now,updated_at:now,revisions:history},f);
+    }
+    delete t.drafts[id]; t.last_decision=id; t.trail.push(id);
+    t.current=t.queue.find(function(k){return k!==id && triageVisible(k) && !own(t.decisions,k);}) || null;
+    await saveState(); renderTriage();
+  } catch(e) { S.triage=before; toast('Entscheidung nicht gespeichert: '+e.message); }
+  finally {triageBusy=false; document.getElementById('triagePanel').inert=false;}
+}
+async function triageNavigate(action) {
+  if(triageBusy || importBusy || !storageReady) return;
+  triageBusy=true;
+  document.getElementById('triagePanel').inert=true;
+  var before=JSON.parse(JSON.stringify(S.triage)),t=S.triage,id=t.current,next=null;
+  try {
+    if(action==='back') next=t.trail.pop() || id;
+    else if(action==='last') next=t.last_decision || id;
+    else {
+      var pending=t.queue.filter(function(k){return triageVisible(k) && !own(t.decisions,k);});
+      if(action==='later' && id) {
+        var rest=pending.filter(function(k){return k!==id;}); next=rest[0] || id;
+        t.queue=t.queue.filter(function(k){return k!==id;}).concat([id]);
+      } else next=pending[0] || null;
+    }
+    if(action!=='back' && id && id!==next) t.trail.push(id);
+    t.current=next;
+    await saveState(); renderTriage();
+  }catch(e){S.triage=before;toast('Navigation nicht gespeichert: '+e.message);}
+  finally{triageBusy=false; document.getElementById('triagePanel').inert=false;}
+}
+
+document.addEventListener('visibilitychange',function(){ if (document.visibilityState==='hidden') flushTriageDraft(); });
+window.addEventListener('pagehide',flushTriageDraft);
 
 if ('serviceWorker' in navigator) {
   window.addEventListener('load',function(){ navigator.serviceWorker.register('./sw.js').catch(function(e){ console.warn('[Reader Log] Service worker registration failed',e); }); });
